@@ -57,7 +57,58 @@ def _ma(group: pd.DataFrame, n: int) -> float:
     return float(group.tail(n)["close"].mean()) if len(group) >= n else float(group["close"].mean())
 
 
-def _status(ret_60: float, ret_20: float, ret_10: float, dd: float, days_from_peak: int, close: float, ma20: float, ma60: float, peak_return: float, worst5: float) -> str:
+def _trend_features(group: pd.DataFrame, peak_high: float, latest_close: float, ma20: float, ma60: float) -> dict[str, Any]:
+    latest = group.iloc[-1]
+    low = float(latest["low"])
+    yearly_low = float(group["low"].min())
+    ma5 = _ma(group, 5)
+    ma10 = _ma(group, 10)
+    ma20_prev = float(group.iloc[-6:-1]["close"].mean()) if len(group) >= 25 else ma20
+    ma60_prev = float(group.iloc[-21:-1]["close"].mean()) if len(group) >= 80 else ma60
+    ma5_prev = float(group.iloc[-10:-5]["close"].mean()) if len(group) >= 10 else ma5
+    ma10_prev = float(group.iloc[-15:-5]["close"].mean()) if len(group) >= 15 else ma10
+    ma5_slope = _pct(ma5, ma5_prev)
+    ma10_slope = _pct(ma10, ma10_prev)
+    ma20_slope = _pct(ma20, ma20_prev)
+    ma60_slope = _pct(ma60, ma60_prev)
+    ma20_distance = _pct(latest_close, ma20)
+    ma60_distance = _pct(latest_close, ma60)
+    high_position = (latest_close - yearly_low) / (peak_high - yearly_low) * 100 if peak_high > yearly_low else 0.0
+    recent = group.tail(20)
+    recent_high = float(recent["high"].max())
+    recent_low = float(recent["low"].min())
+    recent_amp = (recent_high / recent_low - 1) * 100 if recent_low else 0.0
+    ma5_distance = _pct(latest_close, ma5)
+    ma10_distance = _pct(latest_close, ma10)
+    touches = [
+        ("MA5", low <= ma5 * 1.025 and latest_close >= ma5 * 0.985 and ma5_slope >= -3, ma5_distance),
+        ("MA10", low <= ma10 * 1.025 and latest_close >= ma10 * 0.985 and ma10_slope >= -3, ma10_distance),
+        ("MA20", low <= ma20 * 1.025 and latest_close >= ma20 * 0.985 and ma20_slope >= -2, ma20_distance),
+        ("MA60", low <= ma60 * 1.025 and latest_close >= ma60 * 0.98 and ma60_slope >= -2, ma60_distance),
+    ]
+    touched = [x for x in touches if x[1]]
+    if touched:
+        line_type, _, line_distance = min(touched, key=lambda x: abs(x[2]))
+    else:
+        candidates = [("MA5", ma5_distance), ("MA10", ma10_distance), ("MA20", ma20_distance), ("MA60", ma60_distance)]
+        line_type, line_distance = "--", min(candidates, key=lambda x: abs(x[1]))[1]
+    return {
+        "yearlyLow": yearly_low,
+        "ma5Distance": ma5_distance,
+        "ma10Distance": ma10_distance,
+        "ma20Slope": ma20_slope,
+        "ma60Slope": ma60_slope,
+        "ma20Distance": ma20_distance,
+        "ma60Distance": ma60_distance,
+        "highPosition": high_position,
+        "recentAmplitude20": recent_amp,
+        "trendLineType": line_type,
+        "trendLineDistance": line_distance,
+        "trendLineTouched": bool(touched),
+    }
+
+
+def _status(ret_60: float, ret_20: float, ret_10: float, dd: float, days_from_peak: int, close: float, ma20: float, ma60: float, peak_return: float, worst5: float, features: dict[str, Any]) -> str:
     """五类状态规则：先看峰值后回撤，再看短期动量和均线位置。
 
     - 趋势走弱：曾经很强，但从区间高点大幅回撤，且短期/中期动量明显转弱或跌破60日均线。
@@ -66,18 +117,33 @@ def _status(ret_60: float, ret_20: float, ret_10: float, dd: float, days_from_pe
     - 加速：10/20日动量同步强、离高点近、短期节奏明显抬升。
     - 延续：不满足以上极端状态，趋势仍正常推进。
     """
+    high_pos = float(features.get("highPosition") or 0)
+    recent_amp = float(features.get("recentAmplitude20") or 0)
+    touched_line = bool(features.get("trendLineTouched"))
+    ma20_slope = float(features.get("ma20Slope") or 0)
+    ma60_slope = float(features.get("ma60Slope") or 0)
+
     if peak_return >= 60 and dd >= 28 and (ret_20 <= -8 or ret_60 <= -12 or close < ma60):
         return "趋势走弱"
     if peak_return >= 400 and days_from_peak <= 5 and dd >= 6 and worst5 <= -8:
         return "趋势走弱"
-    if peak_return >= 80 and 14 <= dd < 35 and abs(ret_20) <= 18 and days_from_peak <= 80:
+    if close < ma60 * 0.94 and ret_20 < -10 and ma60_slope < 0:
+        return "趋势走弱"
+
+    # 高动量优先判加速：20日/10日同步大幅抬升且贴近高点。
+    if ret_20 >= 35 and ret_10 >= 15 and dd <= 8 and close >= ma20:
+        return "加速"
+
+    # 高位震荡看的是高位区间内的曲线形态：仍处高位、近20日振幅较大、涨跌反复，但没有跌破趋势结构，也没有继续加速。
+    if peak_return >= 80 and high_pos >= 68 and 8 <= dd < 35 and recent_amp >= 12 and -18 <= ret_20 <= 18 and -12 <= ret_10 <= 15 and close >= ma60 * 0.96:
         return "高位震荡"
-    if peak_return >= 400 and dd < 8 and days_from_peak >= 5 and abs(ret_20) <= 18 and abs(ret_10) <= 12:
+    if peak_return >= 350 and high_pos >= 75 and recent_amp >= 10 and abs(ret_20) <= 18 and abs(ret_10) <= 15 and days_from_peak >= 4:
         return "高位震荡"
-    if peak_return >= 250 and days_from_peak <= 3 and 2 <= dd <= 10 and ret_10 > 5 and 0 <= ret_20 <= 35:
+
+    # 回踩必须“碰到/接近趋势线”：当日最低价回踩 MA5/MA10/MA20/MA60 附近，收盘没有有效跌破，且趋势线本身没有明显下弯。
+    if touched_line and high_pos >= 60 and ret_60 > 0 and -8 <= ret_20 <= 35 and dd <= 24 and (ma20_slope >= -1.5 or ma60_slope >= -1):
         return "回踩"
-    if ret_60 > 15 and 8 <= dd <= 22 and -12 <= ret_20 <= 8 and close >= ma60 * 0.96:
-        return "回踩"
+
     if ret_20 >= 25 and ret_10 >= max(12, ret_20 * 0.45) and dd <= 8 and close >= ma20:
         return "加速"
     return "延续"
@@ -150,12 +216,17 @@ def fetch_strong_trend(end: str, top: int = 100, force: bool = False) -> dict[st
         ma20 = _ma(g, 20)
         ma60 = _ma(g, 60)
         latest_close = float(latest["close"])
+        features = _trend_features(g, float(peak["peakHigh"]), latest_close, ma20, ma60)
         score = _score(ret_250, peak_ret, ret_120, ret_60, ret_20, ret_10, dd)
-        if code not in EXAMPLE_CODES and peak_ret < 45 and ret_250 < 30 and ret_120 < 20 and ret_60 < 15:
-            continue
+        avg20_amount_yuan = _money_yuan(float(g.tail(20)["amount"].mean() or 0))
+        strong_candidate = (peak_ret >= 80) or (ret_250 >= 40 and ret_120 >= 25) or (ret_60 >= 30 and ret_20 >= 10)
+        broken_fake_strong = (dd >= 45 and ret_20 < 0) or (latest_close < ma60 * 0.9 and ret_20 < -10)
+        if avg20_amount_yuan < 50_000_000 or not strong_candidate or broken_fake_strong:
+            if code not in EXAMPLE_CODES:
+                continue
         m = meta.get(code, {})
         worst5 = float(g.tail(5)["pct_chg"].min()) if len(g) else 0.0
-        status = _status(ret_60, ret_20, ret_10, dd, int(peak["daysFromPeak"]), latest_close, ma20, ma60, peak_ret, worst5)
+        status = _status(ret_60, ret_20, ret_10, dd, int(peak["daysFromPeak"]), latest_close, ma20, ma60, peak_ret, worst5, features)
         item = {
             "rank": 0,
             "ts_code": code,
@@ -171,13 +242,21 @@ def fetch_strong_trend(end: str, top: int = 100, force: bool = False) -> dict[st
             "drawdown": round(dd, 2),
             "peakDate": peak["peakDate"],
             "daysFromPeak": int(peak["daysFromPeak"]),
-            "ma20Distance": round(_pct(latest_close, ma20), 2),
-            "ma60Distance": round(_pct(latest_close, ma60), 2),
+            "ma20Distance": round(float(features["ma20Distance"]), 2),
+            "ma60Distance": round(float(features["ma60Distance"]), 2),
+            "ma20Slope": round(float(features["ma20Slope"]), 2),
+            "ma60Slope": round(float(features["ma60Slope"]), 2),
+            "highPosition": round(float(features["highPosition"]), 2),
+            "recentAmplitude20": round(float(features["recentAmplitude20"]), 2),
+            "trendLineType": features["trendLineType"],
+            "trendLineDistance": round(float(features["trendLineDistance"]), 2),
+            "trendLineTouched": bool(features["trendLineTouched"]),
             "worst5PctChg": round(worst5, 2),
             "status": status,
             "trendScore": score,
             "latestClose": round(latest_close, 3),
             "latestAmount": _money_yuan(float(latest.get("amount") or 0)),
+            "avg20Amount": avg20_amount_yuan,
             "turnoverProxy": round(float(g.tail(20)["amount"].mean() or 0), 2),
         }
         all_items.append(item)
@@ -196,12 +275,7 @@ def fetch_strong_trend(end: str, top: int = 100, force: bool = False) -> dict[st
 
     all_items.sort(key=lambda x: (x["trendScore"], x["peakRetYear"], x["retYear"], -x["drawdown"]), reverse=True)
     selected_items = all_items[:top]
-    # 保证用户点名的校准样本在接口里可见，便于验证状态规则。
-    selected_codes = {x["ts_code"] for x in selected_items}
-    for item in all_items:
-        if item["ts_code"] in EXAMPLE_CODES and item["ts_code"] not in selected_codes:
-            selected_items.append(item)
-            selected_codes.add(item["ts_code"])
+    examples = {item["ts_code"]: item for item in all_items if item["ts_code"] in EXAMPLE_CODES}
     for i, item in enumerate(selected_items, 1):
         item["rank"] = i
     selected = selected_items[0] if selected_items else None
@@ -239,10 +313,10 @@ def fetch_strong_trend(end: str, top: int = 100, force: bool = False) -> dict[st
         "items": selected_items,
         "industryDistribution": industry_rows[:20],
         "kline": {item["ts_code"]: kline_map.get(item["ts_code"], []) for item in selected_items},
-        "statusRule": "先用近250日最高价计算峰值涨幅和从峰值到最新收盘的真实回撤，再结合10/20/60日动量、20/60日均线位置、距高点天数，归类为加速、延续、趋势走弱、高位震荡、回踩。",
+        "statusRule": "先用近250日最高价计算峰值涨幅和真实回撤；入选候选需满足流动性和强趋势条件；回踩必须判断当日最低价是否触及/接近MA5/MA10/MA20/MA60趋势线且收盘未有效跌破；高位震荡要求处于高位区间、近20日有振幅、短期涨跌反复且未明显加速或走坏。",
     }
     counts = pd.Series([item["status"] for item in selected_items]).value_counts().to_dict() if selected_items else {}
     payload["statusCounts"] = {str(k): int(v) for k, v in counts.items()}
-    payload["examples"] = {item["ts_code"]: item for item in selected_items if item["ts_code"] in EXAMPLE_CODES}
+    payload["examples"] = examples
     p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return payload
