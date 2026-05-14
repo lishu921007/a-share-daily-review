@@ -11,8 +11,6 @@ from app.config import CACHE_DIR
 from app.data_providers.tushare_provider import TushareProvider
 from app.services.universe import load_universe
 
-EXAMPLE_CODES = {"603778.SH", "301377.SZ", "301232.SZ", "301292.SZ", "002718.SZ", "301200.SZ"}
-
 
 def _cache_file(end: str, top: int) -> Path:
     d = CACHE_DIR / "strong_trend"
@@ -20,149 +18,219 @@ def _cache_file(end: str, top: int) -> Path:
     return d / f"{end}_{top}.json"
 
 
-def _pct(a: float, b: float) -> float:
-    if not b or pd.isna(a) or pd.isna(b):
-        return 0.0
-    return (float(a) / float(b) - 1.0) * 100.0
+def _safe_pct(a: float | None, b: float | None) -> float | None:
+    if a is None or b is None or pd.isna(a) or pd.isna(b) or float(b) == 0:
+        return None
+    return float(a) / float(b) - 1.0
 
 
-def _lookback_return(group: pd.DataFrame, n: int) -> float:
-    latest = float(group.iloc[-1]["close"])
-    idx = max(0, len(group) - 1 - n)
-    return _pct(latest, float(group.iloc[idx]["close"]))
+def _score_bool(v: bool, pts: int) -> int:
+    return pts if bool(v) else 0
 
 
-def _peak_stats(group: pd.DataFrame) -> dict[str, float | int | str]:
-    base = float(group.iloc[0]["close"])
-    high_idx = group["high"].astype(float).idxmax()
-    peak_row = group.loc[high_idx]
-    peak_high = float(peak_row["high"])
-    latest_close = float(group.iloc[-1]["close"])
-    peak_pos = int(group.index.get_loc(high_idx))
-    days_from_peak = len(group) - 1 - peak_pos
-    peak_return = _pct(peak_high, base)
-    current_return = _pct(latest_close, base)
-    drawdown = (1 - latest_close / peak_high) * 100 if peak_high else 0.0
-    return {
-        "peakHigh": peak_high,
-        "peakDate": str(peak_row["trade_date"]),
-        "daysFromPeak": days_from_peak,
-        "peakReturnYear": peak_return,
-        "currentReturnYear": current_return,
-        "drawdown": drawdown,
-    }
+def _trend_level(score: int) -> str:
+    if score >= 85:
+        return "极强趋势"
+    if score >= 75:
+        return "强趋势"
+    if score >= 65:
+        return "趋势良好"
+    if score >= 50:
+        return "趋势一般"
+    return "弱趋势"
 
 
-def _ma(group: pd.DataFrame, n: int) -> float:
-    return float(group.tail(n)["close"].mean()) if len(group) >= n else float(group["close"].mean())
+def _trend_state(row: pd.Series) -> str:
+    close = float(row.close)
+    ma5 = row.ma5
+    ma10 = row.ma10
+    ma20 = row.ma20
+    ma60 = row.ma60
+    ma120 = row.ma120
+    ret10 = row.ret10
+    ret20 = row.ret20
+    ret60 = row.ret60
+    drawdown60 = row.drawdown60
+    drawdown120 = row.drawdown120
+    high_pos120 = row.high_pos120
+    dist_ma20 = row.dist_ma20
+    ma20_slope = row.ma20_slope
+    ma60_slope = row.ma60_slope
+    amp20 = row.amp20
+    hhv60 = row.hhv60
+    hhv120 = row.hhv120
 
-
-def _trend_features(group: pd.DataFrame, peak_high: float, latest_close: float, ma20: float, ma60: float) -> dict[str, Any]:
-    latest = group.iloc[-1]
-    low = float(latest["low"])
-    yearly_low = float(group["low"].min())
-    ma5 = _ma(group, 5)
-    ma10 = _ma(group, 10)
-    ma20_prev = float(group.iloc[-6:-1]["close"].mean()) if len(group) >= 25 else ma20
-    ma60_prev = float(group.iloc[-21:-1]["close"].mean()) if len(group) >= 80 else ma60
-    ma5_prev = float(group.iloc[-10:-5]["close"].mean()) if len(group) >= 10 else ma5
-    ma10_prev = float(group.iloc[-15:-5]["close"].mean()) if len(group) >= 15 else ma10
-    ma5_slope = _pct(ma5, ma5_prev)
-    ma10_slope = _pct(ma10, ma10_prev)
-    ma20_slope = _pct(ma20, ma20_prev)
-    ma60_slope = _pct(ma60, ma60_prev)
-    ma20_distance = _pct(latest_close, ma20)
-    ma60_distance = _pct(latest_close, ma60)
-    high_position = (latest_close - yearly_low) / (peak_high - yearly_low) * 100 if peak_high > yearly_low else 0.0
-    recent = group.tail(20)
-    recent_high = float(recent["high"].max())
-    recent_low = float(recent["low"].min())
-    recent_amp = (recent_high / recent_low - 1) * 100 if recent_low else 0.0
-    ma5_distance = _pct(latest_close, ma5)
-    ma10_distance = _pct(latest_close, ma10)
-    touches = [
-        ("MA5", low <= ma5 * 1.025 and latest_close >= ma5 * 0.985 and ma5_slope >= -3, ma5_distance),
-        ("MA10", low <= ma10 * 1.025 and latest_close >= ma10 * 0.985 and ma10_slope >= -3, ma10_distance),
-        ("MA20", low <= ma20 * 1.025 and latest_close >= ma20 * 0.985 and ma20_slope >= -2, ma20_distance),
-        ("MA60", low <= ma60 * 1.025 and latest_close >= ma60 * 0.98 and ma60_slope >= -2, ma60_distance),
-    ]
-    touched = [x for x in touches if x[1]]
-    if touched:
-        line_type, _, line_distance = min(touched, key=lambda x: abs(x[2]))
-    else:
-        candidates = [("MA5", ma5_distance), ("MA10", ma10_distance), ("MA20", ma20_distance), ("MA60", ma60_distance)]
-        line_type, line_distance = "--", min(candidates, key=lambda x: abs(x[1]))[1]
-    return {
-        "yearlyLow": yearly_low,
-        "ma5Distance": ma5_distance,
-        "ma10Distance": ma10_distance,
-        "ma20Slope": ma20_slope,
-        "ma60Slope": ma60_slope,
-        "ma20Distance": ma20_distance,
-        "ma60Distance": ma60_distance,
-        "highPosition": high_position,
-        "recentAmplitude20": recent_amp,
-        "trendLineType": line_type,
-        "trendLineDistance": line_distance,
-        "trendLineTouched": bool(touched),
-    }
-
-
-def _status(ret_60: float, ret_20: float, ret_10: float, dd: float, days_from_peak: int, close: float, ma20: float, ma60: float, peak_return: float, worst5: float, features: dict[str, Any]) -> str:
-    """五类状态规则：先看峰值后回撤，再看短期动量和均线位置。
-
-    - 趋势走弱：曾经很强，但从区间高点大幅回撤，且短期/中期动量明显转弱或跌破60日均线。
-    - 高位震荡：仍在高位区，回撤不小但没有系统性走坏，短期涨跌反复。
-    - 回踩：中期趋势仍在，短期主动降温，回撤适中且未明显破坏60日均线。
-    - 加速：10/20日动量同步强、离高点近、短期节奏明显抬升。
-    - 延续：不满足以上极端状态，趋势仍正常推进。
-    """
-    high_pos = float(features.get("highPosition") or 0)
-    recent_amp = float(features.get("recentAmplitude20") or 0)
-    touched_line = bool(features.get("trendLineTouched"))
-    ma20_slope = float(features.get("ma20Slope") or 0)
-    ma60_slope = float(features.get("ma60Slope") or 0)
-
-    if peak_return >= 60 and dd >= 28 and (ret_20 <= -8 or ret_60 <= -12 or close < ma60):
+    # 1. 趋势走弱
+    if pd.notna(ma60) and close < ma60:
         return "趋势走弱"
-    if peak_return >= 400 and days_from_peak <= 5 and dd >= 6 and worst5 <= -8:
+    if pd.notna(ma20) and pd.notna(ma60) and ma20 < ma60:
         return "趋势走弱"
-    if close < ma60 * 0.94 and ret_20 < -10 and ma60_slope < 0:
+    if pd.notna(drawdown120) and drawdown120 < -0.20:
+        return "趋势走弱"
+    if pd.notna(ma20) and pd.notna(ret20) and pd.notna(ma20_slope) and close < ma20 and ret20 < 0 and ma20_slope <= 0:
         return "趋势走弱"
 
-    # 高动量优先判加速：20日/10日同步大幅抬升且贴近高点。
-    if ret_20 >= 35 and ret_10 >= 15 and dd <= 8 and close >= ma20:
+    # 2. 加速
+    if (
+        pd.notna(ma5) and pd.notna(ma10) and pd.notna(ma20) and pd.notna(ma60)
+        and pd.notna(ret20) and pd.notna(ma20_slope) and pd.notna(hhv60) and pd.notna(dist_ma20)
+        and close > ma5 and ma5 > ma10 and ma10 > ma20 and ma20 > ma60
+        and ret20 > 0.15 and ma20_slope > 0.05
+        and close / hhv60 > 0.97 and dist_ma20 > 0.05
+    ):
         return "加速"
 
-    # 高位震荡看的是高位区间内的曲线形态：仍处高位、近20日振幅较大、涨跌反复，但没有跌破趋势结构，也没有继续加速。
-    if peak_return >= 80 and high_pos >= 68 and 8 <= dd < 35 and recent_amp >= 12 and -18 <= ret_20 <= 18 and -12 <= ret_10 <= 15 and close >= ma60 * 0.96:
-        return "高位震荡"
-    if peak_return >= 350 and high_pos >= 75 and recent_amp >= 10 and abs(ret_20) <= 18 and abs(ret_10) <= 15 and days_from_peak >= 4:
-        return "高位震荡"
-
-    # 回踩必须“碰到/接近趋势线”：当日最低价回踩 MA5/MA10/MA20/MA60 附近，收盘没有有效跌破，且趋势线本身没有明显下弯。
-    if touched_line and high_pos >= 60 and ret_60 > 0 and -8 <= ret_20 <= 35 and dd <= 24 and (ma20_slope >= -1.5 or ma60_slope >= -1):
+    # 3. 回踩
+    if (
+        pd.notna(ma60_slope) and pd.notna(ret60) and pd.notna(drawdown60) and pd.notna(ma60) and pd.notna(ret10)
+        and ma60_slope > 0 and ret60 > 0.10
+        and drawdown60 <= -0.05 and drawdown60 >= -0.15
+        and close > ma60 * 0.97 and ret10 < 0
+    ):
         return "回踩"
 
-    if ret_20 >= 25 and ret_10 >= max(12, ret_20 * 0.45) and dd <= 8 and close >= ma20:
-        return "加速"
-    return "延续"
+    # 4. 高位震荡
+    if (
+        pd.notna(high_pos120) and pd.notna(hhv120) and pd.notna(ret20) and pd.notna(ma20_slope)
+        and pd.notna(ma60_slope) and pd.notna(ma60) and pd.notna(amp20)
+        and high_pos120 > 0.75 and close / hhv120 > 0.85
+        and abs(ret20) < 0.08 and abs(ma20_slope) < 0.03
+        and ma60_slope > 0 and close > ma60
+        and amp20 >= 0.08 and amp20 <= 0.25
+    ):
+        return "高位震荡"
 
+    # 5. 延续
+    if (
+        pd.notna(ma20) and pd.notna(ma60) and pd.notna(ma120) and pd.notna(ma20_slope)
+        and pd.notna(ma60_slope) and pd.notna(ret20) and pd.notna(drawdown60)
+        and close > ma20 and ma20 > ma60 and ma60 > ma120
+        and ma20_slope > 0 and ma60_slope > 0
+        and ret20 > 0 and drawdown60 > -0.10
+    ):
+        return "延续"
 
-def _score(ret_250: float, peak_ret: float, ret_120: float, ret_60: float, ret_20: float, ret_10: float, dd: float) -> int:
-    raw = 0
-    raw += min(max(peak_ret, 0), 320) / 320 * 20
-    raw += min(max(ret_250, 0), 240) / 240 * 14
-    raw += min(max(ret_120, 0), 150) / 150 * 16
-    raw += min(max(ret_60, 0), 80) / 80 * 18
-    raw += min(max(ret_20, 0), 40) / 40 * 20
-    raw += min(max(ret_10, 0), 20) / 20 * 12
-    raw -= min(max(dd - 10, 0), 45) / 45 * 24
-    return int(round(max(0, min(100, raw))))
+    return "未分类"
 
 
 def _money_yuan(amount_thousand_yuan: float) -> float:
     return float(amount_thousand_yuan or 0) * 1000
+
+
+def _calc_latest_features(df: pd.DataFrame) -> pd.DataFrame:
+    out = []
+    for code, g in df.groupby("ts_code"):
+        g = g.dropna(subset=["close"]).sort_values("trade_date").reset_index(drop=True).copy()
+        if len(g) < 120:
+            continue
+        close = g["close"].astype(float)
+        high = g["high"].astype(float)
+        low = g["low"].astype(float)
+        for n in [5, 10, 20, 60, 120, 250]:
+            g[f"ma{n}"] = close.rolling(n, min_periods=n).mean()
+        for n in [10, 20, 60, 120, 240]:
+            g[f"ret{n}"] = close / close.shift(n) - 1
+        g["hhv20"] = close.rolling(20, min_periods=20).max()
+        g["hhv60"] = close.rolling(60, min_periods=60).max()
+        g["hhv120"] = close.rolling(120, min_periods=120).max()
+        g["llv120"] = close.rolling(120, min_periods=120).min()
+        g["drawdown60"] = close / g["hhv60"] - 1
+        g["drawdown120"] = close / g["hhv120"] - 1
+        denom = g["hhv120"] - g["llv120"]
+        g["high_pos120"] = (close - g["llv120"]) / denom
+        g.loc[denom.eq(0), "high_pos120"] = 0.5
+        g["dist_ma20"] = close / g["ma20"] - 1
+        g["dist_ma60"] = close / g["ma60"] - 1
+        g["ma20_slope"] = g["ma20"] / g["ma20"].shift(20) - 1
+        g["ma60_slope"] = g["ma60"] / g["ma60"].shift(20) - 1
+        g["ma120_slope"] = g["ma120"] / g["ma120"].shift(20) - 1
+        g["amp20"] = high.rolling(20, min_periods=20).max() / low.rolling(20, min_periods=20).min() - 1
+        g["above_ma60"] = close > g["ma60"]
+        g["above_ma60_ratio_60"] = g["above_ma60"].rolling(60, min_periods=60).mean()
+        latest = g.iloc[-1].copy()
+        latest["kline"] = g.tail(250).to_dict("records")
+        out.append(latest)
+    return pd.DataFrame(out)
+
+
+def _add_scores(latest: pd.DataFrame) -> pd.DataFrame:
+    latest = latest.copy()
+    latest["ret120_rank_pct"] = latest["ret120"].rank(pct=True, na_option="bottom")
+
+    rows = []
+    for _, r in latest.iterrows():
+        close = float(r.close)
+        structure = 0
+        structure += _score_bool(pd.notna(r.ma20) and close > r.ma20, 5)
+        structure += _score_bool(pd.notna(r.ma20) and pd.notna(r.ma60) and r.ma20 > r.ma60, 5)
+        structure += _score_bool(pd.notna(r.ma60) and pd.notna(r.ma120) and r.ma60 > r.ma120, 5)
+        structure += _score_bool(pd.notna(r.ma120) and pd.notna(r.ma250) and r.ma120 > r.ma250, 5)
+        structure += _score_bool(pd.notna(r.ma20_slope) and r.ma20_slope > 0, 5)
+        structure += _score_bool(pd.notna(r.above_ma60_ratio_60) and r.above_ma60_ratio_60 > 0.70, 5)
+
+        momentum = 0
+        momentum += _score_bool(pd.notna(r.ret20) and r.ret20 > 0, 5)
+        momentum += _score_bool(pd.notna(r.ret20) and r.ret20 > 0.08, 5)
+        momentum += _score_bool(pd.notna(r.ret60) and r.ret60 > 0.10, 5)
+        momentum += _score_bool(pd.notna(r.ret120) and r.ret120 > 0.20, 5)
+        momentum += _score_bool(pd.notna(r.ret120_rank_pct) and r.ret120_rank_pct >= 0.70, 5)
+
+        slope = 0
+        slope += _score_bool(pd.notna(r.ma20_slope) and r.ma20_slope > 0, 4)
+        slope += _score_bool(pd.notna(r.ma20_slope) and r.ma20_slope > 0.03, 4)
+        slope += _score_bool(pd.notna(r.ma60_slope) and r.ma60_slope > 0, 4)
+        slope += _score_bool(pd.notna(r.ma60_slope) and r.ma60_slope > 0.03, 4)
+        slope += _score_bool(pd.notna(r.ma120_slope) and r.ma120_slope > 0, 4)
+
+        position = 0
+        position += _score_bool(pd.notna(r.high_pos120) and r.high_pos120 > 0.60, 5)
+        position += _score_bool(pd.notna(r.high_pos120) and r.high_pos120 > 0.75, 5)
+        position += _score_bool(pd.notna(r.hhv120) and r.hhv120 and close / r.hhv120 > 0.90, 5)
+
+        penalty = 0
+        penalty += _score_bool(pd.notna(r.ma20) and close < r.ma20, 5)
+        penalty += _score_bool(pd.notna(r.ma60) and close < r.ma60, 10)
+        penalty += _score_bool(pd.notna(r.drawdown60) and r.drawdown60 < -0.12, 5)
+        penalty += _score_bool(pd.notna(r.drawdown120) and r.drawdown120 < -0.20, 10)
+        penalty += _score_bool(pd.notna(r.dist_ma60) and r.dist_ma60 > 0.35, 5)
+        penalty = min(penalty, 20)
+
+        strong_checks = [
+            pd.notna(r.ma20) and close > r.ma20,
+            pd.notna(r.ma20) and pd.notna(r.ma60) and r.ma20 > r.ma60,
+            pd.notna(r.ma60) and pd.notna(r.ma120) and r.ma60 > r.ma120,
+            pd.notna(r.ma60_slope) and r.ma60_slope > 0,
+            pd.notna(r.ma120_slope) and r.ma120_slope > 0,
+            pd.notna(r.ret120) and r.ret120 > 0.20,
+            pd.notna(r.high_pos120) and r.high_pos120 > 0.65,
+            pd.notna(r.drawdown120) and r.drawdown120 > -0.25,
+        ]
+        strong_score = sum(1 for x in strong_checks if x)
+        strict_strong = all(strong_checks)
+        is_strong = strong_score >= 6
+        score = max(0, min(100, structure + momentum + slope + position - penalty))
+        rr = r.to_dict()
+        rr.update({
+            "structure_score": structure,
+            "momentum_score": momentum,
+            "slope_score": slope,
+            "position_score": position,
+            "risk_penalty": penalty,
+            "trend_score": int(score),
+            "trend_level": _trend_level(int(score)),
+            "strong_score": int(strong_score),
+            "is_strict_strong_trend": bool(strict_strong),
+            "is_strong_trend": bool(is_strong),
+            "trend_state": _trend_state(r) if is_strong else "未分类",
+        })
+        rows.append(rr)
+    return pd.DataFrame(rows)
+
+
+def _round_pct(v: Any) -> float | None:
+    if v is None or pd.isna(v):
+        return None
+    return round(float(v) * 100, 2)
 
 
 def fetch_strong_trend(end: str, top: int = 100, force: bool = False) -> dict[str, Any]:
@@ -176,10 +244,10 @@ def fetch_strong_trend(end: str, top: int = 100, force: bool = False) -> dict[st
     meta = universe.set_index("ts_code")[["name", "industry_name"]].to_dict("index")
     codes = set(universe["ts_code"].tolist())
 
-    start = (datetime.strptime(end, "%Y%m%d") - timedelta(days=430)).strftime("%Y%m%d")
+    start = (datetime.strptime(end, "%Y%m%d") - timedelta(days=520)).strftime("%Y%m%d")
     cal = provider.trade_cal(start, end)
     dates = sorted(cal[cal["is_open"].astype(int).eq(1)]["cal_date"].astype(str).tolist())
-    dates = [d for d in dates if d <= end][-250:]
+    dates = [d for d in dates if d <= end][-300:]
 
     frames = []
     missing = []
@@ -191,107 +259,94 @@ def fetch_strong_trend(end: str, top: int = 100, force: bool = False) -> dict[st
         except Exception as e:
             missing.append({"trade_date": d, "error": str(e)})
     if not frames:
-        raise RuntimeError("近250个交易日没有可用日K数据，请先检查 Tushare Token 或缓存。")
+        raise RuntimeError("没有可用日K数据，请先检查 Tushare Token 或缓存。")
 
     df = pd.concat(frames, ignore_index=True)
     for c in ["open", "high", "low", "close", "pct_chg", "vol", "amount"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.sort_values(["ts_code", "trade_date"])
 
-    all_items = []
+    latest = _add_scores(_calc_latest_features(df))
+    latest = latest.sort_values(["is_strong_trend", "trend_score", "strong_score", "ret120"], ascending=[False, False, False, False])
+    display = latest[latest["is_strong_trend"].eq(True)].head(top).copy()
+
+    items = []
     kline_map: dict[str, list[dict[str, Any]]] = {}
-    for code, g in df.groupby("ts_code"):
-        g = g.dropna(subset=["close", "high"]).sort_values("trade_date").reset_index(drop=True)
-        if len(g) < 60:
-            continue
-        latest = g.iloc[-1]
-        ret_250 = _lookback_return(g, 250)
-        ret_120 = _lookback_return(g, 120)
-        ret_60 = _lookback_return(g, 60)
-        ret_20 = _lookback_return(g, 20)
-        ret_10 = _lookback_return(g, 10)
-        peak = _peak_stats(g)
-        dd = float(peak["drawdown"])
-        peak_ret = float(peak["peakReturnYear"])
-        ma20 = _ma(g, 20)
-        ma60 = _ma(g, 60)
-        latest_close = float(latest["close"])
-        features = _trend_features(g, float(peak["peakHigh"]), latest_close, ma20, ma60)
-        score = _score(ret_250, peak_ret, ret_120, ret_60, ret_20, ret_10, dd)
-        avg20_amount_yuan = _money_yuan(float(g.tail(20)["amount"].mean() or 0))
-        strong_candidate = (peak_ret >= 80) or (ret_250 >= 40 and ret_120 >= 25) or (ret_60 >= 30 and ret_20 >= 10)
-        broken_fake_strong = (dd >= 45 and ret_20 < 0) or (latest_close < ma60 * 0.9 and ret_20 < -10)
-        if avg20_amount_yuan < 50_000_000 or not strong_candidate or broken_fake_strong:
-            if code not in EXAMPLE_CODES:
-                continue
+    for rank, (_, r) in enumerate(display.iterrows(), 1):
+        code = str(r.ts_code)
         m = meta.get(code, {})
-        worst5 = float(g.tail(5)["pct_chg"].min()) if len(g) else 0.0
-        status = _status(ret_60, ret_20, ret_10, dd, int(peak["daysFromPeak"]), latest_close, ma20, ma60, peak_ret, worst5, features)
         item = {
-            "rank": 0,
+            "rank": rank,
             "ts_code": code,
             "code": code.split(".")[0],
             "name": m.get("name", code),
             "industry": m.get("industry_name", "未分类"),
-            "retYear": round(ret_250, 2),
-            "peakRetYear": round(peak_ret, 2),
-            "retHalf": round(ret_120, 2),
-            "retQuarter": round(ret_60, 2),
-            "retMonth": round(ret_20, 2),
-            "ret10": round(ret_10, 2),
-            "drawdown": round(dd, 2),
-            "peakDate": peak["peakDate"],
-            "daysFromPeak": int(peak["daysFromPeak"]),
-            "ma20Distance": round(float(features["ma20Distance"]), 2),
-            "ma60Distance": round(float(features["ma60Distance"]), 2),
-            "ma20Slope": round(float(features["ma20Slope"]), 2),
-            "ma60Slope": round(float(features["ma60Slope"]), 2),
-            "highPosition": round(float(features["highPosition"]), 2),
-            "recentAmplitude20": round(float(features["recentAmplitude20"]), 2),
-            "trendLineType": features["trendLineType"],
-            "trendLineDistance": round(float(features["trendLineDistance"]), 2),
-            "trendLineTouched": bool(features["trendLineTouched"]),
-            "worst5PctChg": round(worst5, 2),
-            "status": status,
-            "trendScore": score,
-            "latestClose": round(latest_close, 3),
-            "latestAmount": _money_yuan(float(latest.get("amount") or 0)),
-            "avg20Amount": avg20_amount_yuan,
-            "turnoverProxy": round(float(g.tail(20)["amount"].mean() or 0), 2),
+            "retYear": _round_pct(r.ret240),
+            "ret240": _round_pct(r.ret240),
+            "retHalf": _round_pct(r.ret120),
+            "ret120": _round_pct(r.ret120),
+            "retQuarter": _round_pct(r.ret60),
+            "ret60": _round_pct(r.ret60),
+            "retMonth": _round_pct(r.ret20),
+            "ret20": _round_pct(r.ret20),
+            "ret10": _round_pct(r.ret10),
+            "drawdown": _round_pct(r.drawdown120),
+            "drawdown60": _round_pct(r.drawdown60),
+            "drawdown120": _round_pct(r.drawdown120),
+            "highPos120": _round_pct(r.high_pos120),
+            "amp20": _round_pct(r.amp20),
+            "distMa20": _round_pct(r.dist_ma20),
+            "distMa60": _round_pct(r.dist_ma60),
+            "ma20Slope": _round_pct(r.ma20_slope),
+            "ma60Slope": _round_pct(r.ma60_slope),
+            "ma120Slope": _round_pct(r.ma120_slope),
+            "aboveMa60Ratio60": _round_pct(r.above_ma60_ratio_60),
+            "strongScore": int(r.strong_score),
+            "isStrongTrend": bool(r.is_strong_trend),
+            "isStrictStrongTrend": bool(r.is_strict_strong_trend),
+            "status": r.trend_state,
+            "trendState": r.trend_state,
+            "trendScore": int(r.trend_score),
+            "trendLevel": r.trend_level,
+            "structureScore": int(r.structure_score),
+            "momentumScore": int(r.momentum_score),
+            "slopeScore": int(r.slope_score),
+            "positionScore": int(r.position_score),
+            "riskPenalty": int(r.risk_penalty),
+            "ret120RankPct": _round_pct(r.ret120_rank_pct),
+            "latestClose": round(float(r.close), 3),
+            "latestAmount": _money_yuan(float(r.get("amount") or 0)),
         }
-        all_items.append(item)
+        items.append(item)
         kline_map[code] = [
             {
-                "date": str(r.trade_date),
-                "open": round(float(r.open), 3),
-                "high": round(float(r.high), 3),
-                "low": round(float(r.low), 3),
-                "close": round(float(r.close), 3),
-                "amount": _money_yuan(float(r.amount or 0)),
-                "pct_chg": round(float(r.pct_chg or 0), 3),
+                "date": str(x["trade_date"]),
+                "open": round(float(x["open"]), 3),
+                "high": round(float(x["high"]), 3),
+                "low": round(float(x["low"]), 3),
+                "close": round(float(x["close"]), 3),
+                "amount": _money_yuan(float(x.get("amount") or 0)),
+                "pct_chg": round(float(x.get("pct_chg") or 0), 3),
             }
-            for r in g.tail(250).itertuples(index=False)
+            for x in r.kline
         ]
 
-    all_items.sort(key=lambda x: (x["trendScore"], x["peakRetYear"], x["retYear"], -x["drawdown"]), reverse=True)
-    selected_items = all_items[:top]
-    examples = {item["ts_code"]: item for item in all_items if item["ts_code"] in EXAMPLE_CODES}
-    for i, item in enumerate(selected_items, 1):
-        item["rank"] = i
-    selected = selected_items[0] if selected_items else None
-
     industry_rows = []
-    if selected_items:
-        tmp = pd.DataFrame(selected_items)
+    if items:
+        tmp = pd.DataFrame(items)
         for industry, g in tmp.groupby("industry"):
             industry_rows.append({
                 "industry": industry,
                 "count": int(len(g)),
-                "avgRetYear": round(float(g["retYear"].mean()), 2),
-                "avgPeakRetYear": round(float(g["peakRetYear"].mean()), 2),
+                "avgRetYear": round(float(g["retYear"].dropna().mean() or 0), 2),
                 "avgScore": round(float(g["trendScore"].mean()), 2),
             })
-        industry_rows.sort(key=lambda x: (x["count"], x["avgPeakRetYear"]), reverse=True)
+        industry_rows.sort(key=lambda x: (x["count"], x["avgScore"]), reverse=True)
+
+    counts = pd.Series([item["status"] for item in items]).value_counts().to_dict() if items else {}
+    strict_count = int(latest["is_strict_strong_trend"].sum()) if len(latest) else 0
+    loose_count = int(latest["is_strong_trend"].sum()) if len(latest) else 0
+    selected = items[0] if items else None
 
     payload = {
         "source": "tushare_daily_calculated",
@@ -304,19 +359,19 @@ def fetch_strong_trend(end: str, top: int = 100, force: bool = False) -> dict[st
         "universeFieldMapping": mapping,
         "missingDays": missing[:20],
         "summary": {
-            "poolCount": len(selected_items),
+            "poolCount": len(items),
+            "strictStrongCount": strict_count,
+            "looseStrongCount": loose_count,
             "industryCount": len(industry_rows),
             "topName": selected["name"] if selected else "--",
-            "topRetYear": selected["peakRetYear"] if selected else 0,
+            "topRetYear": selected["retYear"] if selected and selected["retYear"] is not None else 0,
             "topScore": selected["trendScore"] if selected else 0,
         },
-        "items": selected_items,
+        "items": items,
         "industryDistribution": industry_rows[:20],
-        "kline": {item["ts_code"]: kline_map.get(item["ts_code"], []) for item in selected_items},
-        "statusRule": "先用近250日最高价计算峰值涨幅和真实回撤；入选候选需满足流动性和强趋势条件；回踩必须判断当日最低价是否触及/接近MA5/MA10/MA20/MA60趋势线且收盘未有效跌破；高位震荡要求处于高位区间、近20日有振幅、短期涨跌反复且未明显加速或走坏。",
+        "kline": {item["ts_code"]: kline_map.get(item["ts_code"], []) for item in items},
+        "statusCounts": {str(k): int(v) for k, v in counts.items()},
+        "statusRule": "先计算 MA/收益率/高低点/回撤/位置/斜率/震荡/站上60日线比例；以 strong_score>=6 识别宽松强趋势，完整条件识别严格强趋势；只对强趋势上涨股按趋势走弱、加速、回踩、高位震荡、延续、未分类优先级分类；trend_score 按结构、动能、斜率、位置和风险扣分计算。",
     }
-    counts = pd.Series([item["status"] for item in selected_items]).value_counts().to_dict() if selected_items else {}
-    payload["statusCounts"] = {str(k): int(v) for k, v in counts.items()}
-    payload["examples"] = examples
     p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return payload
