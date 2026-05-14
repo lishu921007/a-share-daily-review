@@ -1,0 +1,16 @@
+.env
+backend/.env
+backend/.venv/
+frontend/node_modules/
+frontend/dist/
+data/raw/**/*.csv
+data/raw/**/*.parquet
+data/processed/review/*.json
+data/cache/*
+*.pyc
+__pycache__/
+backups/
+
+*.tsbuildinfo
+
+logs/

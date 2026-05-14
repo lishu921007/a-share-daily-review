@@ -1,0 +1,7 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pandas==2.2.3
+pyarrow==18.1.0
+python-dotenv==1.0.1
+tushare==1.4.21
+pydantic==2.10.4
