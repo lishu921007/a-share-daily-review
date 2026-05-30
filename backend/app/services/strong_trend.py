@@ -15,7 +15,7 @@ from app.services.universe import load_universe
 def _cache_file(end: str, top: int) -> Path:
     d = CACHE_DIR / "strong_trend"
     d.mkdir(parents=True, exist_ok=True)
-    return d / f"{end}_{top}.json"
+    return d / f"{end}_{top}_strategy_v1.json"
 
 
 def _safe_pct(a: float | None, b: float | None) -> float | None:
@@ -38,6 +38,28 @@ def _trend_level(score: int) -> str:
     if score >= 50:
         return "趋势一般"
     return "弱趋势"
+
+
+def _entry_level(score: int) -> str:
+    if score >= 80:
+        return "优先观察"
+    if score >= 65:
+        return "可观察"
+    if score >= 50:
+        return "一般"
+    return "暂缓"
+
+
+def _market_position_level(score: int) -> str:
+    if score >= 80:
+        return "强势市场：建议仓位 80%-100%"
+    if score >= 65:
+        return "普通偏强：建议仓位 50%-70%"
+    if score >= 50:
+        return "普通震荡：建议仓位 30%-50%"
+    if score >= 35:
+        return "弱势市场：建议仓位 10%-30%"
+    return "退潮市场：建议仓位 0%-10%"
 
 
 def _trend_state(row: pd.Series) -> str:
@@ -156,6 +178,13 @@ def _calc_latest_features(df: pd.DataFrame) -> pd.DataFrame:
 def _add_scores(latest: pd.DataFrame) -> pd.DataFrame:
     latest = latest.copy()
     latest["ret120_rank_pct"] = latest["ret120"].rank(pct=True, na_option="bottom")
+    above_ma20_ratio = float((latest["close"] > latest["ma20"]).mean()) if len(latest) else 0.0
+    above_ma60_ratio = float((latest["close"] > latest["ma60"]).mean()) if len(latest) else 0.0
+    ret20_positive_ratio = float((latest["ret20"] > 0).mean()) if len(latest) else 0.0
+    market_score = int(max(0, min(100, round(
+        above_ma20_ratio * 35 + above_ma60_ratio * 40 + ret20_positive_ratio * 25
+    ))))
+    market_level = _market_position_level(market_score)
 
     rows = []
     for _, r in latest.iterrows():
@@ -209,6 +238,25 @@ def _add_scores(latest: pd.DataFrame) -> pd.DataFrame:
         strict_strong = all(strong_checks)
         is_strong = strong_score >= 6
         score = max(0, min(100, structure + momentum + slope + position - penalty))
+
+        entry = 0
+        state = _trend_state(r) if is_strong else "未分类"
+        entry += {"回踩": 30, "延续": 26, "高位震荡": 18, "加速": 8, "趋势走弱": 0, "未分类": 10}.get(state, 0)
+        entry += _score_bool(pd.notna(r.dist_ma20) and -0.03 <= r.dist_ma20 <= 0.06, 15)
+        entry += _score_bool(pd.notna(r.dist_ma60) and 0 <= r.dist_ma60 <= 0.25, 12)
+        entry += _score_bool(pd.notna(r.drawdown60) and -0.12 <= r.drawdown60 <= -0.03, 12)
+        entry += _score_bool(pd.notna(r.ret20) and -0.03 <= r.ret20 <= 0.12, 10)
+        entry += _score_bool(pd.notna(r.ma60_slope) and r.ma60_slope > 0, 8)
+        entry += _score_bool(pd.notna(r.above_ma60_ratio_60) and r.above_ma60_ratio_60 > 0.70, 8)
+        entry += _score_bool(pd.notna(r.amp20) and 0.06 <= r.amp20 <= 0.22, 5)
+
+        overheat_penalty = 0
+        overheat_penalty += _score_bool(pd.notna(r.dist_ma60) and r.dist_ma60 > 0.35, 12)
+        overheat_penalty += _score_bool(pd.notna(r.dist_ma20) and r.dist_ma20 > 0.12, 8)
+        overheat_penalty += _score_bool(pd.notna(r.ret20) and r.ret20 > 0.25, 8)
+        overheat_penalty += _score_bool(state == "加速", 5)
+        entry_score = int(max(0, min(100, entry - overheat_penalty)))
+        strategy_score = int(max(0, min(100, round(score * 0.35 + entry_score * 0.45 + market_score * 0.20))))
         rr = r.to_dict()
         rr.update({
             "structure_score": structure,
@@ -218,10 +266,16 @@ def _add_scores(latest: pd.DataFrame) -> pd.DataFrame:
             "risk_penalty": penalty,
             "trend_score": int(score),
             "trend_level": _trend_level(int(score)),
+            "entry_score": entry_score,
+            "entry_level": _entry_level(entry_score),
+            "overheat_penalty": int(overheat_penalty),
+            "market_env_score": market_score,
+            "market_env_level": market_level,
+            "strategy_score": strategy_score,
             "strong_score": int(strong_score),
             "is_strict_strong_trend": bool(strict_strong),
             "is_strong_trend": bool(is_strong),
-            "trend_state": _trend_state(r) if is_strong else "未分类",
+            "trend_state": state,
         })
         rows.append(rr)
     return pd.DataFrame(rows)
@@ -310,6 +364,12 @@ def fetch_strong_trend(end: str, top: int = 200, force: bool = False) -> dict[st
             "trendState": r.trend_state,
             "trendScore": int(r.trend_score),
             "trendLevel": r.trend_level,
+            "entryScore": int(r.entry_score),
+            "entryLevel": r.entry_level,
+            "overheatPenalty": int(r.overheat_penalty),
+            "marketEnvScore": int(r.market_env_score),
+            "marketEnvLevel": r.market_env_level,
+            "strategyScore": int(r.strategy_score),
             "structureScore": int(r.structure_score),
             "momentumScore": int(r.momentum_score),
             "slopeScore": int(r.slope_score),
@@ -368,12 +428,15 @@ def fetch_strong_trend(end: str, top: int = 200, force: bool = False) -> dict[st
             "topName": selected["name"] if selected else "--",
             "topRetYear": selected["retYear"] if selected and selected["retYear"] is not None else 0,
             "topScore": selected["trendScore"] if selected else 0,
+            "topStrategyScore": int(display["strategy_score"].max()) if len(display) else 0,
+            "marketEnvScore": int(display["market_env_score"].iloc[0]) if len(display) else 0,
+            "marketEnvLevel": str(display["market_env_level"].iloc[0]) if len(display) else "--",
         },
         "items": items,
         "industryDistribution": industry_rows[:20],
         "kline": {item["ts_code"]: kline_map.get(item["ts_code"], []) for item in items},
         "statusCounts": {str(k): int(v) for k, v in counts.items()},
-        "statusRule": "先计算 MA/收益率/高低点/回撤/位置/斜率/震荡/站上60日线比例；以 strong_score>=6 识别宽松强趋势，完整条件识别严格强趋势；展示池不区分严格或宽松，统一在 is_strong_trend=true 的股票中按240日涨幅取前200；只对强趋势上涨股按趋势走弱、加速、回踩、高位震荡、延续、未分类优先级分类；trend_score 按结构、动能、斜率、位置和风险扣分计算。",
+        "statusRule": "先计算 MA/收益率/高低点/回撤/位置/斜率/震荡/站上60日线比例；以 strong_score>=6 识别宽松强趋势，完整条件识别严格强趋势；展示池不区分严格或宽松，统一在 is_strong_trend=true 的股票中按240日涨幅取前200；trend_score 衡量趋势质量，entry_score 衡量当前买点性价比，market_env_score 给出全局仓位环境，strategy_score 用于趋势交易综合排序；只对强趋势上涨股按趋势走弱、加速、回踩、高位震荡、延续、未分类优先级分类。",
     }
     p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return payload
