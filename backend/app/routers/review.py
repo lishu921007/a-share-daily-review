@@ -82,7 +82,7 @@ def limitup_review(end: str, days: int = 60, force: bool = False):
         raise HTTPException(400, str(e))
 
 @router.get('/trend/strong')
-def strong_trend(end: str, top: int = 100, force: bool = False):
+def strong_trend(end: str, top: int = 200, force: bool = False):
     try:
         return fetch_strong_trend(end=end, top=top, force=force)
     except Exception as e:

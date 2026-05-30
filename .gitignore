@@ -6,6 +6,7 @@ frontend/dist/
 data/raw/**/*.csv
 data/raw/**/*.parquet
 data/processed/review/*.json
+data/manifests/*.json
 data/cache/*
 *.pyc
 __pycache__/
@@ -14,3 +15,4 @@ backups/
 *.tsbuildinfo
 
 logs/
+.run/
