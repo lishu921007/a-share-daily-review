@@ -267,20 +267,9 @@ def fetch_strong_trend(end: str, top: int = 200, force: bool = False) -> dict[st
     df = df.sort_values(["ts_code", "trade_date"])
 
     latest = _add_scores(_calc_latest_features(df))
-    latest = latest.sort_values(["is_strong_trend", "trend_score", "strong_score", "ret240"], ascending=[False, False, False, False])
-
-    strict_top = latest[latest["is_strict_strong_trend"].eq(True)].sort_values(
+    latest = latest.sort_values(["is_strong_trend", "ret240", "trend_score", "strong_score"], ascending=[False, False, False, False])
+    display = latest[latest["is_strong_trend"].eq(True)].sort_values(
         ["ret240", "trend_score", "strong_score"], ascending=[False, False, False]
-    ).head(100)
-    loose_top = latest[
-        latest["is_strong_trend"].eq(True) & latest["is_strict_strong_trend"].eq(False)
-    ].sort_values(
-        ["ret240", "trend_score", "strong_score"], ascending=[False, False, False]
-    ).head(100)
-    display = pd.concat([strict_top, loose_top], ignore_index=True)
-    display = display.drop_duplicates(subset=["ts_code"], keep="first")
-    display = display.sort_values(
-        ["trend_score", "strong_score", "ret240", "ret120"], ascending=[False, False, False, False]
     ).head(top).copy()
 
     items = []
@@ -384,7 +373,7 @@ def fetch_strong_trend(end: str, top: int = 200, force: bool = False) -> dict[st
         "industryDistribution": industry_rows[:20],
         "kline": {item["ts_code"]: kline_map.get(item["ts_code"], []) for item in items},
         "statusCounts": {str(k): int(v) for k, v in counts.items()},
-        "statusRule": "先计算 MA/收益率/高低点/回撤/位置/斜率/震荡/站上60日线比例；以 strong_score>=6 识别宽松强趋势，完整条件识别严格强趋势；入库展示口径为严格强趋势按240日涨幅取前100、宽松非严格强趋势按240日涨幅取前100，合并后最多展示200；只对强趋势上涨股按趋势走弱、加速、回踩、高位震荡、延续、未分类优先级分类；trend_score 按结构、动能、斜率、位置和风险扣分计算。",
+        "statusRule": "先计算 MA/收益率/高低点/回撤/位置/斜率/震荡/站上60日线比例；以 strong_score>=6 识别宽松强趋势，完整条件识别严格强趋势；展示池不区分严格或宽松，统一在 is_strong_trend=true 的股票中按240日涨幅取前200；只对强趋势上涨股按趋势走弱、加速、回踩、高位震荡、延续、未分类优先级分类；trend_score 按结构、动能、斜率、位置和风险扣分计算。",
     }
     p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return payload
