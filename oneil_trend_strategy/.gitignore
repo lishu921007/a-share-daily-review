@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+outputs/logs/
+outputs/signals/*.csv
+outputs/validation/*.csv
+outputs/stats/*.csv

@@ -8,6 +8,7 @@ from app.calculators.review_calculator import calculate_review
 from app.db.index import upsert_review, list_reviews
 from app.services.limitup_review import fetch_limitup_review
 from app.services.strong_trend import fetch_strong_trend
+from app.services.pattern_signals import fetch_base_on_base_signals
 
 router=APIRouter(prefix='/api', tags=['review'])
 class UpdateRequest(BaseModel):
@@ -85,6 +86,13 @@ def limitup_review(end: str, days: int = 60, force: bool = False):
 def strong_trend(end: str, top: int = 200, force: bool = False):
     try:
         return fetch_strong_trend(end=end, top=top, force=force)
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+@router.get('/pattern/base-on-base')
+def base_on_base_signals(days: int = 100, kline_days: int = 180, kline_limit: int = 50):
+    try:
+        return fetch_base_on_base_signals(days=days, kline_days=kline_days, kline_limit=kline_limit)
     except Exception as e:
         raise HTTPException(400, str(e))
 

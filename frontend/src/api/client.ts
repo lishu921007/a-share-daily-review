@@ -1,4 +1,4 @@
-import type { Review, LimitupReview, StrongTrendReview } from '../types/review';
+import type { Review, LimitupReview, StrongTrendReview, BaseOnBaseReview } from '../types/review';
 async function request<T>(url:string, options?:RequestInit): Promise<T>{
  const res=await fetch(url,{headers:{'Content-Type':'application/json'},...options});
  if(!res.ok){let msg=`HTTP ${res.status}`; try{const j=await res.json(); msg=j.detail||msg}catch{} throw new Error(msg)}
@@ -13,4 +13,5 @@ export const api={
  list:()=>request<any>('/api/review/list?limit=60'),
  limitup:(end:string, days=60, force=false)=>request<LimitupReview>(`/api/limitup/review?end=${end}&days=${days}&force=${force}`),
  strongTrend:(end:string, top=100, force=false)=>request<StrongTrendReview>(`/api/trend/strong?end=${end}&top=${top}&force=${force}`),
+ baseOnBase:(days=100, klineDays=180, klineLimit=50)=>request<BaseOnBaseReview>(`/api/pattern/base-on-base?days=${days}&kline_days=${klineDays}&kline_limit=${klineLimit}`),
 };

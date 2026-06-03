@@ -8,6 +8,8 @@ data/raw/**/*.parquet
 data/processed/review/*.json
 data/manifests/*.json
 data/cache/*
+data/manifests/*
+!data/manifests/recent_300d_download_latest.json
 *.pyc
 __pycache__/
 backups/
@@ -16,3 +18,8 @@ backups/
 
 logs/
 .run/
+oneil_trend_strategy/outputs/*
+!oneil_trend_strategy/outputs/base_on_base_lab/
+oneil_trend_strategy/outputs/base_on_base_lab/*
+!oneil_trend_strategy/outputs/base_on_base_lab/base_on_base_trade_blotter_v5_realistic_20260601_215535.csv
+!oneil_trend_strategy/outputs/base_on_base_lab/base_on_base_trade_blotter_v6_structure_20260601_223011.csv
